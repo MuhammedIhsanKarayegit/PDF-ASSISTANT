@@ -1,0 +1,1 @@
+# Uygulamanın başlatıcısı ve Arayüz (Qt) kodları
