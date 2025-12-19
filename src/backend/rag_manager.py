@@ -6,6 +6,7 @@ from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_ollama import OllamaLLM
 from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 
 
 class RAGManager:
@@ -16,7 +17,7 @@ class RAGManager:
 
         self.llm = OllamaLLM(model="llama3")
     
-    """def load_and_index(self, pdf_path):
+    def load_and_index(self, pdf_path):
         if not os.path.exists(pdf_path):
             print(f"Hata: '{pdf_path}' dosyası bulunamadı.")
             return False
@@ -44,42 +45,64 @@ class RAGManager:
 
         print("Tamamlandı! Veritabanı hazır.")
         return True
-    """
+    
     
     def ask_question(self, question):
+        # 1. Veritabanı Yükle
         if self.vector_store is None:
             self.vector_store = Chroma(
-                persist_directory = self.persist_directory,
-                embedding_function = self.embedding
+                persist_directory=self.persist_directory,
+                embedding_function=self.embedding
             )
+        
+        # 2. Retriever (Daha fazla parça getirsin diye k=5 yapalım)
+        retriever = self.vector_store.as_retriever(search_kwargs={"k": 5})
+        
+        # 3. Özel Prompt Şablonu (Türkçe konuşmaya zorluyoruz)
+        template = """
+        Aşağıdaki bağlam bilgisini kullanarak soruyu cevapla.
+        Eğer cevabı bağlam içinde bulamazsan, "Bilmiyorum" de, uydurma.
+        Cevabı Türkçe ver ve mümkün olduğunca detaylı açıkla.
 
-        retriever = self.vector_store.as_retriever(search_kwargs={"k": 3})
+        Bağlam: {context}
 
-        qa_chain = RetrievalQA.from_chain_type(
-            llm = self.llm,
-            chain_type = "stuff",
-            retriever = retriever
+        Soru: {question}
+        
+        Cevap:
+        """
+        
+        PROMPT = PromptTemplate(
+            template=template, 
+            input_variables=["context", "question"]
         )
 
+        # 4. Zinciri Prompt ile Kur
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            chain_type="stuff",
+            retriever=retriever,
+            chain_type_kwargs={"prompt": PROMPT} # Prompt'u buraya ekledik
+        )
+        
         response = qa_chain.invoke({"query": question})
         return response['result']
+    
 
 if __name__ == "__main__":
-    # Test kodları
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    # doc klasörü src'nin bir üstünde olduğu için yolu ayarlıyoruz:
-    #pdf_yolu = os.path.join(current_dir, "..", "..", "doc", "test.pdf")
-    
-    # Veritabanı klasörü de ana dizinde olsun
     db_yolu = os.path.join(current_dir, "..", "..", "chroma_db")
     
     manager = RAGManager(persist_directory=db_yolu)
-    #manager.load_and_index(pdf_yolu)
-
-    soru = "Bu dokümanın ana konusu nedir?"
+    
+    # --- BU KISIM AKTİF OLMALI ---
+    pdf_yolu = os.path.join(current_dir, "..", "..", "doc", "test.pdf")
+    manager.load_and_index(pdf_yolu) 
+    # -----------------------------
+    
+    # Soru sorma
+    soru = "Bu dokümanın ana konusu nedir? Cevabı Türkçe ver." # Türkçe istedik
     cevap = manager.ask_question(soru)
     
-    print("--------------------------------------------------")
-    print(f"SORU: {soru}")
-    print(f"CEVAP: {cevap}")
-    print("--------------------------------------------------")
+    print("-" * 30)
+    print(f"CEVAP:\n{cevap}")
+    print("-" * 30)
