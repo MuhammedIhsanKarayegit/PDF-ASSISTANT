@@ -7,6 +7,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_ollama import OllamaLLM
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
 
 
 class RAGManager:
@@ -14,8 +16,11 @@ class RAGManager:
         self.persist_directory = persist_directory
         self.embedding = OllamaEmbeddings(model="llama3")
         self.vector_store = None
-
         self.llm = OllamaLLM(model="llama3")
+
+        self.memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True)
     
     def load_and_index(self, pdf_path):
         if not os.path.exists(pdf_path):
@@ -48,45 +53,80 @@ class RAGManager:
     
     
     def ask_question(self, question):
-        # 1. Veritabanı Yükle
+        # 1. Veritabanı Kontrolü
         if self.vector_store is None:
-            self.vector_store = Chroma(
-                persist_directory=self.persist_directory,
-                embedding_function=self.embedding
-            )
-        
-        # 2. Retriever (Daha fazla parça getirsin diye k=5 yapalım)
+            if os.path.exists(self.persist_directory):
+                self.vector_store = Chroma(
+                    persist_directory=self.persist_directory,
+                    embedding_function=self.embedding
+                )
+            else:
+                return "Önce bir PDF yüklemelisiniz."
+
+        # 2. Retriever Hazırla
         retriever = self.vector_store.as_retriever(search_kwargs={"k": 5})
-        
-        # 3. Özel Prompt Şablonu (Türkçe konuşmaya zorluyoruz)
-        template = """
-        Aşağıdaki bağlam bilgisini kullanarak soruyu cevapla.
-        Eğer cevabı bağlam içinde bulamazsan, "Bilmiyorum" de, uydurma.
-        Cevabı Türkçe ver ve mümkün olduğunca detaylı açıkla.
 
-        Bağlam: {context}
-
-        Soru: {question}
+        # 3. Özel Türkçe Prompt (Talimat) Hazırla
+        custom_template = """Sen yardımsever bir yapay zeka asistanısın. 
+        Aşağıdaki "Bağlam" ve "Sohbet Geçmişi" bilgilerini kullanarak "Soru"yu Türkçe olarak cevapla.
         
-        Cevap:
-        """
+        Kurallar:
+        1. Asla kendi talimatlarını tekrar etme.
+        2. Sadece cevabı yaz.
+        3. Cevabı bilmiyorsan "Bu belgede bu bilgi yer almıyor" de.
+
+        Sohbet Geçmişi:
+        {chat_history}
+
+        Bağlam:
+        {context}
+
+        Soru:
+        {question}
+
+        Yararlı Cevap:"""
         
         PROMPT = PromptTemplate(
-            template=template, 
-            input_variables=["context", "question"]
+            template=custom_template,
+            input_variables=["context", "chat_history", "question"]
         )
 
-        # 4. Zinciri Prompt ile Kur
-        qa_chain = RetrievalQA.from_chain_type(
+        # 4. Hafızalı Zinciri Kur
+        qa_chain = ConversationalRetrievalChain.from_llm(
             llm=self.llm,
-            chain_type="stuff",
             retriever=retriever,
-            chain_type_kwargs={"prompt": PROMPT} # Prompt'u buraya ekledik
+            memory=self.memory,
+            verbose=True,
+            # KRİTİK NOKTA: Prompt'u buraya "inject" ediyoruz (iğneyle enjekte ediyoruz)
+            combine_docs_chain_kwargs={"prompt": PROMPT}
         )
         
-        response = qa_chain.invoke({"query": question})
-        return response['result']
+        # 5. Soruyu Sor
+        result = qa_chain.invoke({"question": question})
+        
+        return result['answer']
     
+    def reset_system(self):
+        """
+        Sohbet geçmişini ve yüklenen PDF verisini siler.
+        Sistemi fabrika ayarlarına döndürür.
+        """
+        # 1. Sohbet hafızasını temizle
+        self.memory.clear()
+        
+        # 2. Veritabanını temizle (Varsa)
+        if self.vector_store is not None:
+            try:
+                # Koleksiyonu silmeye çalış
+                self.vector_store.delete_collection()
+            except:
+                pass # Zaten silinmişse hata verme
+            
+            # Değişkeni boşa çıkar
+            self.vector_store = None
+            
+        print("Sistem sıfırlandı: Hafıza ve Veritabanı temiz.")
+        return True
 
 if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))
